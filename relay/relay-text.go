@@ -219,7 +219,7 @@ func TextHelper(c *gin.Context) (newAPIError *types.NewAPIError) {
 		httpResp = resp.(*http.Response)
 		relayInfo.IsStream = relayInfo.IsStream || strings.HasPrefix(httpResp.Header.Get("Content-Type"), "text/event-stream")
 		if httpResp.StatusCode != http.StatusOK {
-			newApiErr = service.RelayErrorHandler(httpResp, false)
+			newApiErr = service.RelayErrorHandlerLegacy(httpResp, false)
 			// reset status code 重置状态码
 			service.ResetStatusCode(newApiErr, statusCodeMappingStr)
 			return newApiErr

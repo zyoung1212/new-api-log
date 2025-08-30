@@ -207,6 +207,12 @@ func DoRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 	return doRequest(c, req, info)
 }
 func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http.Response, error) {
+	// [CLAUDE] API请求开始日志
+	requestStart := time.Now()
+	common2.LogInfo(c, fmt.Sprintf("[CLAUDE] API request start | Method:%s | URL:%s | Proxy:%s", 
+		req.Method, req.URL.String(), 
+		func() string { if info.ChannelSetting.Proxy != "" { return "enabled" } else { return "none" } }()))
+	
 	var client *http.Client
 	var err error
 	if info.ChannelSetting.Proxy != "" {
@@ -238,15 +244,25 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 		}
 	}
 
+	// [CLAUDE] 执行API请求
 	resp, err := client.Do(req)
-
+	requestDuration := time.Since(requestStart)
+	
 	if err != nil {
+		common2.LogError(c, fmt.Sprintf("[CLAUDE] API request failed | Error:%s | Duration:%v", err.Error(), requestDuration))
 		return nil, err
 	}
 	if resp == nil {
+		common2.LogError(c, fmt.Sprintf("[CLAUDE] API response is nil | Duration:%v", requestDuration))
 		return nil, errors.New("resp is nil")
 	}
-
+	
+	// [CLAUDE] API请求成功日志
+	contentType := resp.Header.Get("Content-Type")
+	contentLength := resp.Header.Get("Content-Length")
+	common2.LogInfo(c, fmt.Sprintf("[CLAUDE] API request success | Status:%d | Duration:%v | ContentType:%s | ContentLength:%s", 
+		resp.StatusCode, requestDuration, contentType, contentLength))
+	
 	_ = req.Body.Close()
 	_ = c.Request.Body.Close()
 	return resp, nil

@@ -70,7 +70,11 @@ func RequestOpenAI2ClaudeComplete(textRequest dto.GeneralOpenAIRequest) *dto.Cla
 	return &claudeRequest
 }
 
-func RequestOpenAI2ClaudeMessage(textRequest dto.GeneralOpenAIRequest) (*dto.ClaudeRequest, error) {
+func RequestOpenAI2ClaudeMessage(c *gin.Context, textRequest dto.GeneralOpenAIRequest) (*dto.ClaudeRequest, error) {
+	// [CLAUDE] 请求转换开始
+	common.LogInfo(c, fmt.Sprintf("[CLAUDE] Convert OpenAI to Claude | Messages:%d | Tools:%d | Model:%s | Stream:%v", 
+		len(textRequest.Messages), len(textRequest.Tools), textRequest.Model, textRequest.Stream))
+	
 	claudeTools := make([]any, 0, len(textRequest.Tools))
 
 	for _, tool := range textRequest.Tools {
@@ -92,12 +96,18 @@ func RequestOpenAI2ClaudeMessage(textRequest dto.GeneralOpenAIRequest) (*dto.Cla
 				claudeTool.InputSchema[s] = a
 			}
 			claudeTools = append(claudeTools, &claudeTool)
+			common.LogInfo(c, fmt.Sprintf("[CLAUDE] Tool converted | Name:%s | Description:%s", tool.Function.Name, tool.Function.Description))
 		}
+	}
+	
+	if len(claudeTools) > 0 {
+		common.LogInfo(c, fmt.Sprintf("[CLAUDE] Tools conversion completed | Count:%d", len(claudeTools)))
 	}
 
 	// Web search tool
 	// https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/web-search-tool
 	if textRequest.WebSearchOptions != nil {
+		common.LogInfo(c, "[CLAUDE] Web search tool detected, converting...")
 		webSearchTool := dto.ClaudeWebSearchTool{
 			Type: "web_search_20250305",
 			Name: "web_search",
@@ -145,6 +155,8 @@ func RequestOpenAI2ClaudeMessage(textRequest dto.GeneralOpenAIRequest) (*dto.Cla
 		}
 
 		claudeTools = append(claudeTools, &webSearchTool)
+		common.LogInfo(c, fmt.Sprintf("[CLAUDE] Web search tool configured | MaxUses:%d | HasUserLocation:%v", 
+			webSearchTool.MaxUses, webSearchTool.UserLocation != nil))
 	}
 
 	claudeRequest := dto.ClaudeRequest{
@@ -172,6 +184,7 @@ func RequestOpenAI2ClaudeMessage(textRequest dto.GeneralOpenAIRequest) (*dto.Cla
 
 	if model_setting.GetClaudeSettings().ThinkingAdapterEnabled &&
 		strings.HasSuffix(textRequest.Model, "-thinking") {
+		common.LogInfo(c, "[CLAUDE] Thinking adapter enabled for -thinking model")
 
 		// 因为BudgetTokens 必须大于1024
 		if claudeRequest.MaxTokens < 1280 {
@@ -188,9 +201,12 @@ func RequestOpenAI2ClaudeMessage(textRequest dto.GeneralOpenAIRequest) (*dto.Cla
 		claudeRequest.TopP = 0
 		claudeRequest.Temperature = common.GetPointer[float64](1.0)
 		claudeRequest.Model = strings.TrimSuffix(textRequest.Model, "-thinking")
+		common.LogInfo(c, fmt.Sprintf("[CLAUDE] Thinking mode configured | BudgetTokens:%d | Model:%s", 
+			*claudeRequest.Thinking.BudgetTokens, claudeRequest.Model))
 	}
 
 	if textRequest.ReasoningEffort != "" {
+		common.LogInfo(c, fmt.Sprintf("[CLAUDE] ReasoningEffort detected | Level:%s", textRequest.ReasoningEffort))
 		switch textRequest.ReasoningEffort {
 		case "low":
 			claudeRequest.Thinking = &dto.Thinking{
@@ -208,10 +224,12 @@ func RequestOpenAI2ClaudeMessage(textRequest dto.GeneralOpenAIRequest) (*dto.Cla
 				BudgetTokens: common.GetPointer[int](4096),
 			}
 		}
+		common.LogInfo(c, fmt.Sprintf("[CLAUDE] ReasoningEffort configured | BudgetTokens:%d", *claudeRequest.Thinking.BudgetTokens))
 	}
 
 	// 指定了 reasoning 参数,覆盖 budgetTokens
 	if textRequest.Reasoning != nil {
+		common.LogInfo(c, "[CLAUDE] Custom reasoning parameter detected")
 		var reasoning openrouter.RequestReasoning
 		if err := common.Unmarshal(textRequest.Reasoning, &reasoning); err != nil {
 			return nil, err
@@ -223,6 +241,7 @@ func RequestOpenAI2ClaudeMessage(textRequest dto.GeneralOpenAIRequest) (*dto.Cla
 				Type:         "enabled",
 				BudgetTokens: &budgetTokens,
 			}
+			common.LogInfo(c, fmt.Sprintf("[CLAUDE] Custom reasoning configured | BudgetTokens:%d", budgetTokens))
 		}
 	}
 
@@ -393,6 +412,13 @@ func RequestOpenAI2ClaudeMessage(textRequest dto.GeneralOpenAIRequest) (*dto.Cla
 	}
 	claudeRequest.Prompt = ""
 	claudeRequest.Messages = claudeMessages
+	
+	// [CLAUDE] 转换完成日志
+	common.LogInfo(c, fmt.Sprintf("[CLAUDE] Conversion completed | ClaudeMessages:%d | System:%s | HasThinking:%v", 
+		len(claudeMessages), 
+		func() string { if claudeRequest.System != "" { return "present" } else { return "none" } }(), 
+		claudeRequest.Thinking != nil))
+	
 	return &claudeRequest, nil
 }
 
@@ -609,10 +635,14 @@ func HandleStreamResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 	var claudeResponse dto.ClaudeResponse
 	err := common.UnmarshalJsonStr(data, &claudeResponse)
 	if err != nil {
-		common.SysError("error unmarshalling stream response: " + err.Error())
+		common.LogError(c, fmt.Sprintf("[CLAUDE] Stream response unmarshal failed | Error:%s | RawData:%s", 
+			err.Error(), func() string { if len(data) > 200 { return data[:200] + "..." } else { return data } }()))
 		return types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
 	if claudeResponse.Error != nil && claudeResponse.Error.Type != "" {
+		// [CLAUDE] Claude API特有错误
+		common.LogError(c, fmt.Sprintf("[CLAUDE] Claude API error in stream | Type:%s | Message:%s", 
+			claudeResponse.Error.Type, claudeResponse.Error.Message))
 		return types.WithClaudeError(*claudeResponse.Error, http.StatusInternalServerError)
 	}
 	if info.RelayFormat == relaycommon.RelayFormatClaude {
@@ -652,9 +682,14 @@ func HandleStreamFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, clau
 			//上游出错
 		}
 		if claudeInfo.Usage.CompletionTokens == 0 || !claudeInfo.Done {
-			if common.DebugEnabled {
-				common.SysError("claude response usage is not complete, maybe upstream error")
-			}
+			// [CLAUDE] 检测到上游响应不完整的错误
+			common.LogWarn(c, fmt.Sprintf("[CLAUDE] Incomplete upstream response detected | CompletionTokens:%d | Done:%v | ResponseText:%s", 
+				claudeInfo.Usage.CompletionTokens, claudeInfo.Done, 
+				func() string { 
+					text := claudeInfo.ResponseText.String()
+					if len(text) > 100 { return text[:100] + "..." } 
+					return text 
+				}()))
 			claudeInfo.Usage = service.ResponseText2Usage(claudeInfo.ResponseText.String(), info.UpstreamModelName, claudeInfo.Usage.PromptTokens)
 		}
 	}
@@ -675,6 +710,10 @@ func HandleStreamFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, clau
 }
 
 func ClaudeStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, requestMode int) (*types.NewAPIError, *dto.Usage) {
+	// [CLAUDE] 流式响应处理开始
+	common.LogInfo(c, fmt.Sprintf("[CLAUDE] Stream response processing started | ResponseID:%s | Model:%s | RequestMode:%d", 
+		helper.GetResponseID(c), info.UpstreamModelName, requestMode))
+	
 	claudeInfo := &ClaudeResponseInfo{
 		ResponseId:   helper.GetResponseID(c),
 		Created:      common.GetTimestamp(),
@@ -683,9 +722,12 @@ func ClaudeStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.
 		Usage:        &dto.Usage{},
 	}
 	var err *types.NewAPIError
+	var chunkCount int
 	helper.StreamScannerHandler(c, resp, info, func(data string) bool {
+		chunkCount++
 		err = HandleStreamResponseData(c, info, claudeInfo, data, requestMode)
 		if err != nil {
+			common.LogError(c, fmt.Sprintf("[CLAUDE] Stream chunk processing failed | ChunkNum:%d | Error:%s", chunkCount, err.Error()))
 			return false
 		}
 		return true
@@ -693,6 +735,10 @@ func ClaudeStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.
 	if err != nil {
 		return err, nil
 	}
+
+	// [CLAUDE] 流式响应处理完成
+	common.LogInfo(c, fmt.Sprintf("[CLAUDE] Stream processing completed | TotalChunks:%d | Usage:%+v", 
+		chunkCount, *claudeInfo.Usage))
 
 	HandleStreamFinalResponse(c, info, claudeInfo, requestMode)
 	return nil, claudeInfo.Usage
@@ -702,9 +748,14 @@ func HandleClaudeResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 	var claudeResponse dto.ClaudeResponse
 	err := common.Unmarshal(data, &claudeResponse)
 	if err != nil {
+		common.LogError(c, fmt.Sprintf("[CLAUDE] Non-stream response unmarshal failed | Error:%s | DataSize:%d bytes", 
+			err.Error(), len(data)))
 		return types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
 	if claudeResponse.Error != nil && claudeResponse.Error.Type != "" {
+		// [CLAUDE] Claude API特有错误
+		common.LogError(c, fmt.Sprintf("[CLAUDE] Claude API error in non-stream | Type:%s | Message:%s", 
+			claudeResponse.Error.Type, claudeResponse.Error.Message))
 		return types.WithClaudeError(*claudeResponse.Error, http.StatusInternalServerError)
 	}
 	if requestMode == RequestModeCompletion {
@@ -743,6 +794,10 @@ func HandleClaudeResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 func ClaudeHandler(c *gin.Context, resp *http.Response, requestMode int, info *relaycommon.RelayInfo) (*types.NewAPIError, *dto.Usage) {
 	defer common.CloseResponseBodyGracefully(resp)
 
+	// [CLAUDE] 非流式响应处理开始
+	common.LogInfo(c, fmt.Sprintf("[CLAUDE] Non-stream response processing started | ResponseID:%s | Model:%s | RequestMode:%d", 
+		helper.GetResponseID(c), info.UpstreamModelName, requestMode))
+
 	claudeInfo := &ClaudeResponseInfo{
 		ResponseId:   helper.GetResponseID(c),
 		Created:      common.GetTimestamp(),
@@ -752,15 +807,24 @@ func ClaudeHandler(c *gin.Context, resp *http.Response, requestMode int, info *r
 	}
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
+		common.LogError(c, fmt.Sprintf("[CLAUDE] Failed to read response body | Error:%s", err.Error()))
 		return types.NewError(err, types.ErrorCodeBadResponseBody), nil
 	}
+	
+	// [CLAUDE] 记录响应体信息
+	bodySize := len(responseBody)
+	common.LogInfo(c, fmt.Sprintf("[CLAUDE] Response body read | Size:%d bytes", bodySize))
 	if common.DebugEnabled {
 		println("responseBody: ", string(responseBody))
 	}
 	handleErr := HandleClaudeResponseData(c, info, claudeInfo, responseBody, requestMode)
 	if handleErr != nil {
+		common.LogError(c, fmt.Sprintf("[CLAUDE] Response data handling failed | Error:%s", handleErr.Error()))
 		return handleErr, nil
 	}
+	
+	// [CLAUDE] 非流式响应处理完成
+	common.LogInfo(c, fmt.Sprintf("[CLAUDE] Non-stream processing completed | Usage:%+v", *claudeInfo.Usage))
 	return nil, claudeInfo.Usage
 }
 

@@ -11,6 +11,8 @@ import (
 	"one-api/types"
 	"strconv"
 	"strings"
+
+	"github.com/gin-gonic/gin"
 )
 
 func MidjourneyErrorWrapper(code int, desc string) *dto.MidjourneyResponse {
@@ -79,7 +81,60 @@ func ClaudeErrorWrapperLocal(err error, code string, statusCode int) *dto.Claude
 	return claudeErr
 }
 
-func RelayErrorHandler(resp *http.Response, showBodyWhenFail bool) (newApiErr *types.NewAPIError) {
+// RelayErrorHandler 处理上游API错误响应（带上下文的新版本）
+func RelayErrorHandler(c *gin.Context, resp *http.Response, showBodyWhenFail bool) (newApiErr *types.NewAPIError) {
+	// [CLAUDE] 上游错误处理开始
+	common.LogWarn(c, fmt.Sprintf("[CLAUDE] Upstream error detected | Status:%d | URL:%s", 
+		resp.StatusCode, resp.Request.URL.String()))
+	
+	newApiErr = &types.NewAPIError{
+		StatusCode: resp.StatusCode,
+		ErrorType:  types.ErrorTypeOpenAIError,
+	}
+
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		common.LogError(c, fmt.Sprintf("[CLAUDE] Failed to read error response body | Error:%s", err.Error()))
+		return
+	}
+	common.CloseResponseBodyGracefully(resp)
+	
+	// [CLAUDE] 记录原始错误响应
+	bodyStr := string(responseBody)
+	if len(bodyStr) > 1000 {
+		bodyStr = bodyStr[:1000] + "...[truncated]"
+	}
+	common.LogError(c, fmt.Sprintf("[CLAUDE] Upstream error response | Body:%s", bodyStr))
+	
+	var errResponse dto.GeneralErrorResponse
+	err = common.Unmarshal(responseBody, &errResponse)
+	if err != nil {
+		common.LogError(c, fmt.Sprintf("[CLAUDE] Failed to parse error response | ParseError:%s", err.Error()))
+		if showBodyWhenFail {
+			newApiErr.Err = fmt.Errorf("bad response status code %d, body: %s", resp.StatusCode, string(responseBody))
+		} else {
+			newApiErr.Err = fmt.Errorf("bad response status code %d", resp.StatusCode)
+		}
+		return
+	}
+	if errResponse.Error.Message != "" {
+		// General format error (OpenAI, Anthropic, Gemini, etc.)
+		common.LogError(c, fmt.Sprintf("[CLAUDE] Structured error response | Type:%s | Code:%s | Message:%s", 
+			errResponse.Error.Type, errResponse.Error.Code, errResponse.Error.Message))
+		newApiErr = types.WithOpenAIError(errResponse.Error, resp.StatusCode)
+	} else {
+		common.LogError(c, fmt.Sprintf("[CLAUDE] Unstructured error response | Message:%s", errResponse.ToMessage()))
+		newApiErr = types.NewErrorWithStatusCode(errors.New(errResponse.ToMessage()), types.ErrorCodeBadResponseStatusCode, resp.StatusCode)
+		newApiErr.ErrorType = types.ErrorTypeOpenAIError
+	}
+	
+	// [CLAUDE] 错误处理完成日志
+	common.LogError(c, fmt.Sprintf("[CLAUDE] Upstream error processing completed | FinalError:%s", newApiErr.Error()))
+	return
+}
+
+// RelayErrorHandlerLegacy 处理上游API错误响应（兼容旧版本，无上下文）
+func RelayErrorHandlerLegacy(resp *http.Response, showBodyWhenFail bool) (newApiErr *types.NewAPIError) {
 	newApiErr = &types.NewAPIError{
 		StatusCode: resp.StatusCode,
 		ErrorType:  types.ErrorTypeOpenAIError,

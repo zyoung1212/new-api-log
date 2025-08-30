@@ -14,6 +14,7 @@ import (
 	"one-api/setting/model_setting"
 	"one-api/types"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -34,14 +35,23 @@ func getAndValidateClaudeRequest(c *gin.Context) (textRequest *dto.ClaudeRequest
 }
 
 func ClaudeHelper(c *gin.Context) (newAPIError *types.NewAPIError) {
+	startTime := time.Now()
 
 	relayInfo := relaycommon.GenRelayInfoClaude(c)
+
+	// [CLAUDE] 请求开始日志
+	common.LogInfo(c, fmt.Sprintf("[CLAUDE] Request started | User:%d | Channel:%d | Model:%s | IsStream:%v", 
+		relayInfo.UserId, relayInfo.ChannelId, relayInfo.OriginModelName, relayInfo.IsStream))
 
 	// get & validate textRequest 获取并验证文本请求
 	textRequest, err := getAndValidateClaudeRequest(c)
 	if err != nil {
+		common.LogError(c, fmt.Sprintf("[CLAUDE] Request validation failed | Error:%s", err.Error()))
 		return types.NewError(err, types.ErrorCodeInvalidRequest)
 	}
+
+	common.LogInfo(c, fmt.Sprintf("[CLAUDE] Request validated | Messages:%d | MaxTokens:%d | Stream:%v", 
+		len(textRequest.Messages), textRequest.MaxTokens, textRequest.Stream))
 
 	if textRequest.Stream {
 		relayInfo.IsStream = true
@@ -52,11 +62,17 @@ func ClaudeHelper(c *gin.Context) (newAPIError *types.NewAPIError) {
 		return types.NewError(err, types.ErrorCodeChannelModelMappedError)
 	}
 
+	// [CLAUDE] Token计算开始
+	tokenCountStart := time.Now()
 	promptTokens, err := getClaudePromptTokens(textRequest, relayInfo)
+	tokenCountTime := time.Since(tokenCountStart)
 	// count messages token error 计算promptTokens错误
 	if err != nil {
+		common.LogError(c, fmt.Sprintf("[CLAUDE] Token count failed | Error:%s | Time:%v", err.Error(), tokenCountTime))
 		return types.NewError(err, types.ErrorCodeCountTokenFailed)
 	}
+
+	common.LogInfo(c, fmt.Sprintf("[CLAUDE] Token counted | PromptTokens:%d | Time:%v", promptTokens, tokenCountTime))
 
 	priceData, err := helper.ModelPriceHelper(c, relayInfo, promptTokens, int(textRequest.MaxTokens))
 	if err != nil {
@@ -122,30 +138,64 @@ func ClaudeHelper(c *gin.Context) (newAPIError *types.NewAPIError) {
 	requestBody = bytes.NewBuffer(jsonData)
 
 	statusCodeMappingStr := c.GetString("status_code_mapping")
+	// [CLAUDE] 准备上游API调用
+	requestSize := len(jsonData)
+	common.LogInfo(c, fmt.Sprintf("[CLAUDE] Calling upstream API | URL:%s | RequestSize:%d bytes | Model:%s", 
+		relayInfo.BaseUrl, requestSize, relayInfo.UpstreamModelName))
+	
+	upstreamCallStart := time.Now()
 	var httpResp *http.Response
 	resp, err := adaptor.DoRequest(c, relayInfo, requestBody)
+	upstreamCallTime := time.Since(upstreamCallStart)
+	
 	if err != nil {
+		common.LogError(c, fmt.Sprintf("[CLAUDE] Upstream API call failed | Error:%s | Time:%v", err.Error(), upstreamCallTime))
 		return types.NewOpenAIError(err, types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
 	}
 
 	if resp != nil {
 		httpResp = resp.(*http.Response)
 		relayInfo.IsStream = relayInfo.IsStream || strings.HasPrefix(httpResp.Header.Get("Content-Type"), "text/event-stream")
+		
+		// [CLAUDE] 记录上游API响应信息
+		contentType := httpResp.Header.Get("Content-Type")
+		contentLength := httpResp.Header.Get("Content-Length")
+		common.LogInfo(c, fmt.Sprintf("[CLAUDE] Upstream API response | Status:%d | ContentType:%s | ContentLength:%s | Time:%v", 
+			httpResp.StatusCode, contentType, contentLength, upstreamCallTime))
+		
 		if httpResp.StatusCode != http.StatusOK {
-			newAPIError = service.RelayErrorHandler(httpResp, false)
+			common.LogWarn(c, fmt.Sprintf("[CLAUDE] Upstream API error status | Status:%d | Time:%v", 
+				httpResp.StatusCode, upstreamCallTime))
+			newAPIError = service.RelayErrorHandler(c, httpResp, false)
 			// reset status code 重置状态码
 			service.ResetStatusCode(newAPIError, statusCodeMappingStr)
 			return newAPIError
 		}
 	}
 
+	// [CLAUDE] 开始响应处理
+	responseProcessStart := time.Now()
 	usage, newAPIError := adaptor.DoResponse(c, httpResp, relayInfo)
-	//log.Printf("usage: %v", usage)
+	responseProcessTime := time.Since(responseProcessStart)
+	
 	if newAPIError != nil {
 		// reset status code 重置状态码
 		service.ResetStatusCode(newAPIError, statusCodeMappingStr)
+		common.LogError(c, fmt.Sprintf("[CLAUDE] Response processing failed | Error:%s | Time:%v", 
+			newAPIError.Error(), responseProcessTime))
 		return newAPIError
 	}
+	
+	// [CLAUDE] 记录最终使用情况
+	totalTime := time.Since(startTime)
+	if usage != nil {
+		usageInfo := usage.(*dto.Usage)
+		common.LogInfo(c, fmt.Sprintf("[CLAUDE] Request completed | TotalTime:%v | PromptTokens:%d | CompletionTokens:%d | TotalTokens:%d", 
+			totalTime, usageInfo.PromptTokens, usageInfo.CompletionTokens, usageInfo.TotalTokens))
+	} else {
+		common.LogInfo(c, fmt.Sprintf("[CLAUDE] Request completed | TotalTime:%v | Usage:nil", totalTime))
+	}
+	
 	service.PostClaudeConsumeQuota(c, relayInfo, usage.(*dto.Usage), preConsumedQuota, userQuota, priceData, "")
 	return nil
 }

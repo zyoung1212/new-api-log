@@ -170,7 +170,7 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 		return nil, errors.New("request is nil")
 	}
 	if a.RequestMode == RequestModeClaude {
-		claudeReq, err := claude.RequestOpenAI2ClaudeMessage(*request)
+		claudeReq, err := claude.RequestOpenAI2ClaudeMessage(c, *request)
 		if err != nil {
 			return nil, err
 		}
