@@ -82,6 +82,14 @@ func getAndValidateTextRequest(c *gin.Context, relayInfo *relaycommon.RelayInfo)
 		}
 	}
 	relayInfo.IsStream = textRequest.Stream
+	
+	// [CLAUDE] 如果是Claude渠道，强制启用流式处理
+	if relayInfo.ChannelType == constant.ChannelTypeAnthropic {
+		textRequest.Stream = true
+		relayInfo.IsStream = true
+		common.LogInfo(c, "[CLAUDE] Forced stream mode enabled for Claude channel requests")
+	}
+	
 	return textRequest, nil
 }
 

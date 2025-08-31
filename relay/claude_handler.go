@@ -53,9 +53,10 @@ func ClaudeHelper(c *gin.Context) (newAPIError *types.NewAPIError) {
 	common.LogInfo(c, fmt.Sprintf("[CLAUDE] Request validated | Messages:%d | MaxTokens:%d | Stream:%v", 
 		len(textRequest.Messages), textRequest.MaxTokens, textRequest.Stream))
 
-	if textRequest.Stream {
-		relayInfo.IsStream = true
-	}
+	// [CLAUDE] 强制启用流式处理，忽略客户端设置
+	textRequest.Stream = true
+	relayInfo.IsStream = true
+	common.LogInfo(c, "[CLAUDE] Forced stream mode enabled for Claude requests")
 
 	err = helper.ModelMappedHelper(c, relayInfo, textRequest)
 	if err != nil {

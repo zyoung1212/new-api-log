@@ -48,7 +48,7 @@ func RequestOpenAI2ClaudeComplete(textRequest dto.GeneralOpenAIRequest) *dto.Cla
 		Temperature:   textRequest.Temperature,
 		TopP:          textRequest.TopP,
 		TopK:          textRequest.TopK,
-		Stream:        textRequest.Stream,
+		Stream:        true, // [CLAUDE] 强制启用流式处理
 	}
 	if claudeRequest.MaxTokensToSample == 0 {
 		claudeRequest.MaxTokensToSample = 4096
@@ -72,7 +72,7 @@ func RequestOpenAI2ClaudeComplete(textRequest dto.GeneralOpenAIRequest) *dto.Cla
 
 func RequestOpenAI2ClaudeMessage(c *gin.Context, textRequest dto.GeneralOpenAIRequest) (*dto.ClaudeRequest, error) {
 	// [CLAUDE] 请求转换开始
-	common.LogInfo(c, fmt.Sprintf("[CLAUDE] Convert OpenAI to Claude | Messages:%d | Tools:%d | Model:%s | Stream:%v", 
+	common.LogInfo(c, fmt.Sprintf("[CLAUDE] Convert OpenAI to Claude | Messages:%d | Tools:%d | Model:%s | OriginalStream:%v | ForcedStream:true", 
 		len(textRequest.Messages), len(textRequest.Tools), textRequest.Model, textRequest.Stream))
 	
 	claudeTools := make([]any, 0, len(textRequest.Tools))
@@ -166,7 +166,7 @@ func RequestOpenAI2ClaudeMessage(c *gin.Context, textRequest dto.GeneralOpenAIRe
 		Temperature:   textRequest.Temperature,
 		TopP:          textRequest.TopP,
 		TopK:          textRequest.TopK,
-		Stream:        textRequest.Stream,
+		Stream:        true, // [CLAUDE] 强制启用流式处理
 		Tools:         claudeTools,
 	}
 
