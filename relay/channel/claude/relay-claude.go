@@ -642,6 +642,9 @@ func HandleStreamResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 	// [CLAUDE] 收集原始JSON响应数据
 	claudeInfo.RawResponse.WriteString(data)
 	claudeInfo.RawResponse.WriteString("\n")
+	// [CLAUDE] 调试信息：记录数据块收集
+	currentLength := claudeInfo.RawResponse.Len()
+	common.LogInfo(c, fmt.Sprintf("[CLAUDE] Raw JSON chunk collected | ChunkSize:%d bytes | TotalCollected:%d bytes", len(data), currentLength))
 
 	var claudeResponse dto.ClaudeResponse
 	err := common.UnmarshalJsonStr(data, &claudeResponse)
@@ -762,7 +765,10 @@ func ClaudeStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.
 
 	// [CLAUDE] 打印完整原始响应JSON
 	rawResponseBody := claudeInfo.RawResponse.String()
+	rawResponseLength := len(rawResponseBody)
+	common.LogInfo(c, fmt.Sprintf("[CLAUDE] ===== COMPLETE RAW RESPONSE JSON START ===== Length: %d bytes", rawResponseLength))
 	common.LogInfo(c, fmt.Sprintf("[CLAUDE] Complete raw response JSON: %s", rawResponseBody))
+	common.LogInfo(c, fmt.Sprintf("[CLAUDE] ===== COMPLETE RAW RESPONSE JSON END ====="))
 
 	HandleStreamFinalResponse(c, info, claudeInfo, requestMode)
 	return nil, claudeInfo.Usage
