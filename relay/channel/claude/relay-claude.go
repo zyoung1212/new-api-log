@@ -589,6 +589,7 @@ type ClaudeResponseInfo struct {
 	Created      int64
 	Model        string
 	ResponseText strings.Builder
+	RawResponse  strings.Builder
 	Usage        *dto.Usage
 	Done         bool
 }
@@ -638,6 +639,10 @@ func FormatClaudeResponseInfo(requestMode int, claudeResponse *dto.ClaudeRespons
 }
 
 func HandleStreamResponseData(c *gin.Context, info *relaycommon.RelayInfo, claudeInfo *ClaudeResponseInfo, data string, requestMode int) *types.NewAPIError {
+	// [CLAUDE] 收集原始JSON响应数据
+	claudeInfo.RawResponse.WriteString(data)
+	claudeInfo.RawResponse.WriteString("\n")
+
 	var claudeResponse dto.ClaudeResponse
 	err := common.UnmarshalJsonStr(data, &claudeResponse)
 	if err != nil {
@@ -733,6 +738,7 @@ func ClaudeStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.
 		Created:      common.GetTimestamp(),
 		Model:        info.UpstreamModelName,
 		ResponseText: strings.Builder{},
+		RawResponse:  strings.Builder{},
 		Usage:        &dto.Usage{},
 	}
 	var err *types.NewAPIError
@@ -754,9 +760,9 @@ func ClaudeStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.
 	common.LogInfo(c, fmt.Sprintf("[CLAUDE] Stream processing completed | TotalChunks:%d | Usage:%+v",
 		chunkCount, *claudeInfo.Usage))
 
-	// [CLAUDE] 打印完整响应体
-	completeBody := claudeInfo.ResponseText.String()
-	common.LogInfo(c, fmt.Sprintf("[CLAUDE] Complete response body: %s", completeBody))
+	// [CLAUDE] 打印完整原始响应JSON
+	rawResponseBody := claudeInfo.RawResponse.String()
+	common.LogInfo(c, fmt.Sprintf("[CLAUDE] Complete raw response JSON: %s", rawResponseBody))
 
 	HandleStreamFinalResponse(c, info, claudeInfo, requestMode)
 	return nil, claudeInfo.Usage
@@ -821,6 +827,7 @@ func ClaudeHandler(c *gin.Context, resp *http.Response, requestMode int, info *r
 		Created:      common.GetTimestamp(),
 		Model:        info.UpstreamModelName,
 		ResponseText: strings.Builder{},
+		RawResponse:  strings.Builder{},
 		Usage:        &dto.Usage{},
 	}
 	responseBody, err := io.ReadAll(resp.Body)
@@ -828,6 +835,9 @@ func ClaudeHandler(c *gin.Context, resp *http.Response, requestMode int, info *r
 		common.LogError(c, fmt.Sprintf("[CLAUDE] Failed to read response body | Error:%s", err.Error()))
 		return types.NewError(err, types.ErrorCodeBadResponseBody), nil
 	}
+
+	// [CLAUDE] 收集原始JSON响应数据
+	claudeInfo.RawResponse.Write(responseBody)
 
 	// [CLAUDE] 记录响应体信息
 	bodySize := len(responseBody)
