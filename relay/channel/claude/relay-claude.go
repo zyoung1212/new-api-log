@@ -592,6 +592,110 @@ type ClaudeResponseInfo struct {
 	RawResponse  strings.Builder
 	Usage        *dto.Usage
 	Done         bool
+	
+	// 用于重组完整响应的字段
+	MessageId    string
+	Role         string
+	ContentBlocks []dto.ClaudeMediaMessage
+	StopReason   string
+	CompleteUsage *dto.ClaudeUsage
+}
+
+// updateCompleteResponseData 更新完整响应数据，用于重组流式响应
+func updateCompleteResponseData(claudeInfo *ClaudeResponseInfo, claudeResponse *dto.ClaudeResponse) {
+	switch claudeResponse.Type {
+	case "message_start":
+		if claudeResponse.Message != nil {
+			claudeInfo.MessageId = claudeResponse.Message.Id
+			claudeInfo.Role = claudeResponse.Message.Role
+			claudeInfo.Model = claudeResponse.Message.Model
+			if claudeResponse.Message.Usage != nil {
+				claudeInfo.CompleteUsage = claudeResponse.Message.Usage
+			}
+			// 初始化内容块数组
+			claudeInfo.ContentBlocks = make([]dto.ClaudeMediaMessage, 0)
+		}
+	case "content_block_start":
+		if claudeResponse.ContentBlock != nil {
+			// 添加新的内容块
+			content := dto.ClaudeMediaMessage{
+				Type: claudeResponse.ContentBlock.Type,
+				Id:   claudeResponse.ContentBlock.Id,
+				Name: claudeResponse.ContentBlock.Name,
+			}
+			if claudeResponse.ContentBlock.Type == "text" {
+				content.SetText("")
+			}
+			claudeInfo.ContentBlocks = append(claudeInfo.ContentBlocks, content)
+		}
+	case "content_block_delta":
+		if claudeResponse.Delta != nil && len(claudeInfo.ContentBlocks) > 0 {
+			// 获取当前内容块的索引
+			index := 0
+			if claudeResponse.Index != nil {
+				index = *claudeResponse.Index
+			}
+			if index < len(claudeInfo.ContentBlocks) {
+				switch claudeResponse.Delta.Type {
+				case "text_delta":
+					if claudeResponse.Delta.Text != nil {
+						currentText := claudeInfo.ContentBlocks[index].GetText()
+						newText := currentText + *claudeResponse.Delta.Text
+						claudeInfo.ContentBlocks[index].SetText(newText)
+					}
+				case "input_json_delta":
+					if claudeResponse.Delta.PartialJson != nil {
+						// 对于tool_use类型的内容块，累积JSON数据
+						currentPartialJson := ""
+						if claudeInfo.ContentBlocks[index].PartialJson != nil {
+							currentPartialJson = *claudeInfo.ContentBlocks[index].PartialJson
+						}
+						newPartialJson := currentPartialJson + *claudeResponse.Delta.PartialJson
+						claudeInfo.ContentBlocks[index].PartialJson = &newPartialJson
+					}
+				}
+			}
+		}
+	case "content_block_stop":
+		// 内容块结束，可以进行最终处理
+		if claudeResponse.Index != nil && *claudeResponse.Index < len(claudeInfo.ContentBlocks) {
+			// 对于tool_use类型，解析完整的JSON
+			if claudeInfo.ContentBlocks[*claudeResponse.Index].Type == "tool_use" && claudeInfo.ContentBlocks[*claudeResponse.Index].PartialJson != nil {
+				var input map[string]any
+				if err := json.Unmarshal([]byte(*claudeInfo.ContentBlocks[*claudeResponse.Index].PartialJson), &input); err == nil {
+					claudeInfo.ContentBlocks[*claudeResponse.Index].Input = input
+				}
+			}
+		}
+	case "message_delta":
+		if claudeResponse.Delta != nil {
+			if claudeResponse.Delta.StopReason != nil {
+				claudeInfo.StopReason = *claudeResponse.Delta.StopReason
+			}
+		}
+		// 更新最终的usage信息
+		if claudeResponse.Usage != nil {
+			claudeInfo.CompleteUsage = claudeResponse.Usage
+		}
+	case "message_stop":
+		claudeInfo.Done = true
+	case "ping":
+		// 心跳包，忽略
+	}
+}
+
+// buildCompleteResponse 构建完整的Claude响应对象
+func buildCompleteResponse(claudeInfo *ClaudeResponseInfo) *dto.ClaudeResponse {
+	response := &dto.ClaudeResponse{
+		Id:         claudeInfo.MessageId,
+		Type:       "message",
+		Role:       claudeInfo.Role,
+		Model:      claudeInfo.Model,
+		Content:    claudeInfo.ContentBlocks,
+		StopReason: claudeInfo.StopReason,
+		Usage:      claudeInfo.CompleteUsage,
+	}
+	return response
 }
 
 func FormatClaudeResponseInfo(requestMode int, claudeResponse *dto.ClaudeResponse, oaiResponse *dto.ChatCompletionsStreamResponse, claudeInfo *ClaudeResponseInfo) bool {
@@ -665,6 +769,10 @@ func HandleStreamResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 			claudeResponse.Error.Type, claudeResponse.Error.Message))
 		return types.WithClaudeError(*claudeResponse.Error, http.StatusInternalServerError)
 	}
+	
+	// [CLAUDE] 重组完整响应数据
+	updateCompleteResponseData(claudeInfo, &claudeResponse)
+	
 	if info.RelayFormat == relaycommon.RelayFormatClaude {
 		FormatClaudeResponseInfo(requestMode, &claudeResponse, nil, claudeInfo)
 
@@ -769,6 +877,20 @@ func ClaudeStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.
 	common.LogInfo(c, fmt.Sprintf("[CLAUDE] ===== COMPLETE RAW RESPONSE JSON START ===== Length: %d bytes", rawResponseLength))
 	common.LogInfo(c, fmt.Sprintf("[CLAUDE] Complete raw response JSON: %s", rawResponseBody))
 	common.LogInfo(c, fmt.Sprintf("[CLAUDE] ===== COMPLETE RAW RESPONSE JSON END ====="))
+	
+	// [CLAUDE] 打印重组后的完整响应JSON
+	if claudeInfo.Done {
+		completeResponse := buildCompleteResponse(claudeInfo)
+		if completeResponseJSON, err := json.Marshal(completeResponse); err == nil {
+			common.LogInfo(c, fmt.Sprintf("[CLAUDE] ===== RECONSTRUCTED COMPLETE RESPONSE JSON START ===== Length: %d bytes", len(completeResponseJSON)))
+			common.LogInfo(c, fmt.Sprintf("[CLAUDE] Reconstructed complete response JSON: %s", string(completeResponseJSON)))
+			common.LogInfo(c, fmt.Sprintf("[CLAUDE] ===== RECONSTRUCTED COMPLETE RESPONSE JSON END ====="))
+		} else {
+			common.LogError(c, fmt.Sprintf("[CLAUDE] Failed to marshal reconstructed response: %s", err.Error()))
+		}
+	} else {
+		common.LogWarn(c, "[CLAUDE] Stream not completed, cannot reconstruct complete response")
+	}
 
 	HandleStreamFinalResponse(c, info, claudeInfo, requestMode)
 	return nil, claudeInfo.Usage
